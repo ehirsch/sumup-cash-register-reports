@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Generated reports – not tracked in version control
+reports/*
+!reports/.gitkeep
+
+# Data files contain business data – not tracked in version control
+data/*
+!data/.gitkeep
+
+# Editor
+.vscode/
