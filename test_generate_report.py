@@ -360,6 +360,22 @@ class TestDiscoverMonths(unittest.TestCase):
         result = discover_months(self.data_dir)
         self.assertEqual(result, {})
 
+    def test_finds_pairs_across_different_years(self):
+        for start, end in [("2025-12-01", "2025-12-31"), ("2026-01-01", "2026-01-31")]:
+            self._touch(f"GoBD-report-sales-payments-{start}_{end}.csv")
+            self._touch(f"GoBD-report-sales-taxes-{start}_{end}.csv")
+        result = discover_months(self.data_dir)
+        self.assertIn("2025-12", result)
+        self.assertIn("2026-01", result)
+
+    def test_incomplete_pair_across_years_not_included(self):
+        """Only payments file for 2025-11, only taxes file for 2026-02 — neither should appear."""
+        self._touch("GoBD-report-sales-payments-2025-11-01_2025-11-30.csv")
+        self._touch("GoBD-report-sales-taxes-2026-02-01_2026-02-28.csv")
+        result = discover_months(self.data_dir)
+        self.assertNotIn("2025-11", result)
+        self.assertNotIn("2026-02", result)
+
 
 # ---------------------------------------------------------------------------
 # Tests for run_reports.run
@@ -447,6 +463,34 @@ class TestRun(unittest.TestCase):
         run(self.data_dir, self.reports_dir)
         expected = os.path.join(self.reports_dir, "tax_report_2026-06.pdf")
         self.assertTrue(os.path.isfile(expected))
+
+    def test_multiple_years(self):
+        """CSV pairs from different years are all discovered and processed."""
+        self._write_month("2025-11")
+        self._write_month("2025-12")
+        self._write_month("2026-01")
+        run(self.data_dir, self.reports_dir)
+        for month in ("2025-11", "2025-12", "2026-01"):
+            self.assertTrue(
+                os.path.isfile(os.path.join(self.reports_dir, f"tax_report_{month}.pdf")),
+                f"Missing report for {month}",
+            )
+
+    def test_multiple_years_sorted_order(self):
+        """Reports across years are generated in chronological order."""
+        self._write_month("2026-01")
+        self._write_month("2025-12")
+
+        call_order = []
+        def fake_build(p, t, out):
+            call_order.append(out)
+            open(out, "w").close()
+
+        with patch("run_reports.build_report", side_effect=fake_build):
+            run(self.data_dir, self.reports_dir)
+
+        self.assertIn("2025-12", call_order[0])
+        self.assertIn("2026-01", call_order[1])
 
 
 if __name__ == "__main__":
