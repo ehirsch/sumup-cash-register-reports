@@ -50,6 +50,8 @@ def build_report(zip_file: str, output_file: str):
     with zipfile.ZipFile(zip_file) as zf:
         payments = read_csv_from_zip(zf, "sales-payments")
         taxes = read_csv_from_zip(zf, "sales-taxes")
+        totals = read_csv_from_zip(zf, "sales-totals")
+        z_totals = read_csv_from_zip(zf, "daily-totals")
 
     # --- Aggregate payments ---
     total_revenue = Decimal("0")
@@ -69,6 +71,20 @@ def build_report(zip_file: str, output_file: str):
     # Build sale_id -> payment method lookup
     sale_method = {p["Sale ID"]: p["Payment Method"].upper() for p in payments}
 
+    # --- Aggregate tips per payment method ---
+    cash_tips = Decimal("0")
+    card_tips = Decimal("0")
+    for t in totals:
+        tip = parse_decimal(t.get("Total Tips", "0"))
+        if tip == 0:
+            continue
+        method = sale_method.get(t["Sale ID"], "")
+        if method == "CASH":
+            cash_tips += tip
+        elif method == "CARD":
+            card_tips += tip
+    total_tips = cash_tips + card_tips
+
     # --- Aggregate taxes per payment method and rate ---
     def empty_tax():
         return {"sales_incl": Decimal("0"), "sales_excl": Decimal("0"), "tax_amount": Decimal("0")}
@@ -86,10 +102,11 @@ def build_report(zip_file: str, output_file: str):
             tax_totals[method][rate]["sales_excl"] += parse_decimal(t["Total Sales Excl Tax"])
             tax_totals[method][rate]["tax_amount"] += parse_decimal(t["Total Tax Amount"])
 
-    # --- Derive report date and label ---
+    # --- Derive report date, fiscal number and label ---
     dates = [p["Fiscal Date"][:10] for p in payments if p.get("Fiscal Date")]
     report_date = min(dates) if dates else ""
 
+    fiscal_number = z_totals[0].get("Fiscal Number", "") if z_totals else ""
     merchant = payments[0]["Merchant Name"] if payments else "Unknown"
 
     date_label = ""
@@ -119,7 +136,24 @@ def build_report(zip_file: str, output_file: str):
 
     story = []
     story.append(Paragraph(f"Tagesbericht – {merchant}", title_style))
-    story.append(Paragraph(date_label, subtitle_style))
+
+    # Header row: date label left, date + fiscal number right
+    fiscal_label = f"Z-Bericht Nr. {fiscal_number}" if fiscal_number else ""
+    date_right = report_date.replace("-", ".") if report_date else ""
+    header_right = f"{date_right}   {fiscal_label}".strip()
+
+    header_table = Table(
+        [[Paragraph(date_label, subtitle_style), Paragraph(header_right, subtitle_style)]],
+        colWidths=[11 * cm, 6 * cm],
+    )
+    header_table.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+    ]))
+    story.append(header_table)
 
     # --- Revenue summary ---
     story.append(Paragraph("Umsatzübersicht", section_style))
@@ -129,6 +163,9 @@ def build_report(zip_file: str, output_file: str):
         ["davon Barzahlung", fmt(cash_revenue)],
         ["davon Kartenzahlung", fmt(card_revenue)],
         ["Anzahl Transaktionen", str(num_sales)],
+        ["Trinkgeld gesamt", fmt(total_tips)],
+        ["davon Barzahlung", fmt(cash_tips)],
+        ["davon Kartenzahlung", fmt(card_tips)],
     ]
     summary_table = Table(summary_data, colWidths=[10 * cm, 5 * cm])
     summary_table.setStyle(TableStyle([
@@ -217,11 +254,18 @@ def main():
 
     output = args.output
     if not output:
-        # derive date from filename, e.g. GoBD-daily-archive-2026-03-06_2026-03-06.zip
         import re
         m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(args.zip_file))
         date = m.group(1) if m else "unknown"
-        output = f"tax_report_{date}.pdf"
+        # Read fiscal number for filename
+        try:
+            with zipfile.ZipFile(args.zip_file) as zf:
+                z_totals = read_csv_from_zip(zf, "daily-totals")
+                fiscal = z_totals[0].get("Fiscal Number", "") if z_totals else ""
+        except Exception:
+            fiscal = ""
+        suffix = f"_Z{fiscal}" if fiscal else ""
+        output = f"tax_report_{date}{suffix}.pdf"
 
     build_report(args.zip_file, output)
 

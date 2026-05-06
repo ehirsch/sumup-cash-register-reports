@@ -77,7 +77,7 @@ python3 generate_report.py GoBD-daily-archive-2026-03-06_2026-03-06.zip [-o outp
 
 ## Output structure
 
-Reports are organised into per-month subfolders. The `YYYY-MM-DD` filename prefix ensures files sort chronologically.
+Reports are saved as `tax_report_YYYY-MM-DD_Z{fiscal}.pdf` in a `reports/YYYY-MM/` subfolder. The date prefix ensures files sort chronologically; the fiscal number matches the SumUp Z-Bericht for that day.
 
 ```
 reports/
@@ -93,7 +93,8 @@ reports/
 Each PDF contains:
 
 - Heading with merchant name and full date (e.g. *Tagesbericht – Freitag, 06. März 2026*)
-- Revenue summary table (total, cash, card, number of transactions)
+- Date and Z-Bericht fiscal number top-right
+- Revenue summary table (total, cash, card, number of transactions, tips by payment method)
 - Tax breakdown for cash payments (Barzahlung) at 7% and 19%
 - Tax breakdown for card payments (Kartenzahlung) at 7% and 19%
 
@@ -108,7 +109,7 @@ Each PDF contains:
 ├── generate_report.py      # Core report generation logic
 ├── run_reports.py          # Zip discovery and orchestration
 ├── run_report.sh           # Entry point shell script
-├── test_generate_report.py # Test suite (42 tests)
+├── test_generate_report.py # Test suite (48 tests)
 └── requirements.txt
 ```
 

@@ -36,6 +36,19 @@ TAX_FIELDS = [
     "Total Sales Excl Tax", "Total Tax Amount",
 ]
 
+TOTALS_FIELDS = [
+    "Merchant Name", "Merchant ID", "Currency", "Fiscal Number",
+    "Closing Date", "Sale ID", "Fiscal Date", "Fiscal Status",
+    "Sale Type", "Total Sales Incl Tax", "Total Sales Excl Tax",
+    "Total Tax Amount", "Total Tips", "Refund Reference", "Sale Signature",
+]
+
+Z_TOTALS_FIELDS = [
+    "Merchant Name", "Merchant ID", "Currency", "Fiscal Number",
+    "Opening Date", "Closing Date", "Total Sales Incl Tax",
+    "Total Sales Excl Tax", "Total Tax Amount", "Total Payments", "Total Tips",
+]
+
 BASE_PAYMENT = {
     "Merchant Name": "Test Shop", "Merchant ID": "M001", "Currency": "EUR",
     "Fiscal Number": "1", "Closing Date": "2026-03-06 12:00:00",
@@ -53,6 +66,24 @@ BASE_TAX = {
     "Total Sales Excl Tax": "8,40", "Total Tax Amount": "1,60",
 }
 
+BASE_TOTALS = {
+    "Merchant Name": "Test Shop", "Merchant ID": "M001", "Currency": "EUR",
+    "Fiscal Number": "1", "Closing Date": "2026-03-06 12:00:00",
+    "Sale ID": "sale-001", "Fiscal Date": "2026-03-06 12:00:00",
+    "Fiscal Status": "Finished", "Sale Type": "Sale",
+    "Total Sales Incl Tax": "10,00", "Total Sales Excl Tax": "8,40",
+    "Total Tax Amount": "1,60", "Total Tips": "0,00",
+    "Refund Reference": "", "Sale Signature": "",
+}
+
+BASE_Z_TOTALS = {
+    "Merchant Name": "Test Shop", "Merchant ID": "M001", "Currency": "EUR",
+    "Fiscal Number": "42", "Opening Date": "2026-03-06 00:00:00",
+    "Closing Date": "2026-03-06 23:59:59", "Total Sales Incl Tax": "10,00",
+    "Total Sales Excl Tax": "8,40", "Total Tax Amount": "1,60",
+    "Total Payments": "10,00", "Total Tips": "0,00",
+}
+
 
 def make_csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
     buf = io.StringIO()
@@ -62,13 +93,23 @@ def make_csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
-def make_zip(path: str, payments: list[dict], taxes: list[dict], date: str = "2026-03-06"):
+def make_zip(path: str, payments: list[dict], taxes: list[dict],
+             date: str = "2026-03-06", fiscal_number: str = "42",
+             totals: list[dict] = None):
     """Write a zip archive with the expected SumUp file structure."""
+    if totals is None:
+        totals = [{**BASE_TOTALS, "Sale ID": p["Sale ID"]} for p in payments]
+    z_totals_row = [{**BASE_Z_TOTALS, "Fiscal Number": fiscal_number,
+                     "Opening Date": f"{date} 00:00:00", "Closing Date": f"{date} 23:59:59"}]
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr(f"GoBD-report-sales-payments-{date}_{date}.csv",
                     make_csv_bytes(payments, PAYMENT_FIELDS))
         zf.writestr(f"GoBD-report-sales-taxes-{date}_{date}.csv",
                     make_csv_bytes(taxes, TAX_FIELDS))
+        zf.writestr(f"GoBD-report-sales-totals-{date}_{date}.csv",
+                    make_csv_bytes(totals, TOTALS_FIELDS))
+        zf.writestr(f"Z-report-daily-totals-{date}_{date}.csv",
+                    make_csv_bytes(z_totals_row, Z_TOTALS_FIELDS))
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +218,36 @@ class TestBuildReport(unittest.TestCase):
         result = build_report(self.zip_file, self.output_file)
         self.assertEqual(result, "2026-03-06")
 
+    def test_fiscal_number_in_pdf(self):
+        """build_report should complete without error when fiscal number is present."""
+        make_zip(self.zip_file, [BASE_PAYMENT], [BASE_TAX], fiscal_number="7")
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
+    def test_tips_split_by_payment_method(self):
+        """Tips are correctly attributed to cash or card based on payment method."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CASH"},
+            {**BASE_PAYMENT, "Sale ID": "s2", "Payment Method": "CARD", "Fiscal Number": "2"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1"},
+            {**BASE_TAX, "Sale ID": "s2", "Fiscal Number": "2"},
+        ]
+        totals = [
+            {**BASE_TOTALS, "Sale ID": "s1", "Total Tips": "2,00"},
+            {**BASE_TOTALS, "Sale ID": "s2", "Total Tips": "3,50", "Fiscal Number": "2"},
+        ]
+        make_zip(self.zip_file, payments, taxes, totals=totals)
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
+    def test_zero_tips_no_error(self):
+        """Days with no tips should still generate a valid report."""
+        make_zip(self.zip_file, [BASE_PAYMENT], [BASE_TAX])
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
     def test_cash_and_card_split(self):
         payments = [
             {**BASE_PAYMENT, "Sale ID": "s1", "Total Payments": "10,00", "Payment Method": "CASH"},
@@ -273,6 +344,10 @@ class TestFilenameConventions(unittest.TestCase):
     def test_daily_filename_format(self):
         self.assertEqual(f"tax_report_2026-03-06.pdf", "tax_report_2026-03-06.pdf")
 
+    def test_daily_filename_with_fiscal_number(self):
+        date, fiscal = "2026-03-06", "4"
+        self.assertEqual(f"tax_report_{date}_Z{fiscal}.pdf", "tax_report_2026-03-06_Z4.pdf")
+
     def test_daily_filenames_sort_chronologically(self):
         filenames = [
             "tax_report_2026-03-10.pdf",
@@ -347,12 +422,12 @@ class TestRun(unittest.TestCase):
         self.data_dir = tempfile.mkdtemp()
         self.reports_dir = tempfile.mkdtemp()
 
-    def _make_zip(self, date: str):
-        month = date[:7]
+    def _make_zip(self, date: str, fiscal_number: str = "42"):
         filename = f"GoBD-daily-archive-{date}_{date}.zip"
         payment = {**BASE_PAYMENT, "Fiscal Date": f"{date} 12:00:00",
                    "Closing Date": f"{date} 12:00:00"}
-        make_zip(os.path.join(self.data_dir, filename), [payment], [BASE_TAX], date)
+        make_zip(os.path.join(self.data_dir, filename), [payment], [BASE_TAX],
+                 date, fiscal_number)
 
     def test_creates_month_subfolder(self):
         self._make_zip("2026-03-06")
@@ -360,37 +435,37 @@ class TestRun(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.reports_dir, "2026-03")))
 
     def test_generates_daily_report(self):
-        self._make_zip("2026-03-06")
+        self._make_zip("2026-03-06", fiscal_number="4")
         run(self.data_dir, self.reports_dir)
         self.assertTrue(os.path.isfile(
-            os.path.join(self.reports_dir, "2026-03", "tax_report_2026-03-06.pdf")
+            os.path.join(self.reports_dir, "2026-03", "tax_report_2026-03-06_Z4.pdf")
         ))
 
     def test_generates_one_report_per_zip(self):
-        for date in ("2026-03-06", "2026-03-07", "2026-03-10"):
-            self._make_zip(date)
+        for i, date in enumerate(("2026-03-06", "2026-03-07", "2026-03-10"), start=4):
+            self._make_zip(date, fiscal_number=str(i))
         run(self.data_dir, self.reports_dir)
-        for date in ("2026-03-06", "2026-03-07", "2026-03-10"):
+        for i, date in enumerate(("2026-03-06", "2026-03-07", "2026-03-10"), start=4):
             self.assertTrue(os.path.isfile(
-                os.path.join(self.reports_dir, "2026-03", f"tax_report_{date}.pdf")
+                os.path.join(self.reports_dir, "2026-03", f"tax_report_{date}_Z{i}.pdf")
             ))
 
     def test_skips_existing_report(self):
-        self._make_zip("2026-03-06")
+        self._make_zip("2026-03-06", fiscal_number="4")
         month_dir = os.path.join(self.reports_dir, "2026-03")
         os.makedirs(month_dir)
-        open(os.path.join(month_dir, "tax_report_2026-03-06.pdf"), "w").close()
+        open(os.path.join(month_dir, "tax_report_2026-03-06_Z4.pdf"), "w").close()
 
         with patch("run_reports.build_report") as mock_build:
             run(self.data_dir, self.reports_dir)
             mock_build.assert_not_called()
 
     def test_generates_only_missing_days(self):
-        self._make_zip("2026-03-06")
-        self._make_zip("2026-03-07")
+        self._make_zip("2026-03-06", fiscal_number="4")
+        self._make_zip("2026-03-07", fiscal_number="5")
         month_dir = os.path.join(self.reports_dir, "2026-03")
         os.makedirs(month_dir)
-        open(os.path.join(month_dir, "tax_report_2026-03-06.pdf"), "w").close()
+        open(os.path.join(month_dir, "tax_report_2026-03-06_Z4.pdf"), "w").close()
 
         with patch("run_reports.build_report") as mock_build:
             run(self.data_dir, self.reports_dir)
@@ -425,6 +500,25 @@ class TestRun(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.reports_dir, "2025-12")))
         self.assertTrue(os.path.isdir(os.path.join(self.reports_dir, "2026-01")))
 
+    def test_skips_empty_day(self):
+        """A zip whose Z-report totals has no data rows should be skipped."""
+        date = "2026-03-01"
+        filename = f"GoBD-daily-archive-{date}_{date}.zip"
+        payment = {**BASE_PAYMENT, "Fiscal Date": f"{date} 12:00:00",
+                   "Closing Date": f"{date} 12:00:00"}
+        # Write zip with empty Z-report totals (header only, no rows)
+        with zipfile.ZipFile(os.path.join(self.data_dir, filename), "w") as zf:
+            zf.writestr(f"GoBD-report-sales-payments-{date}_{date}.csv",
+                        make_csv_bytes([payment], PAYMENT_FIELDS))
+            zf.writestr(f"GoBD-report-sales-taxes-{date}_{date}.csv",
+                        make_csv_bytes([BASE_TAX], TAX_FIELDS))
+            zf.writestr(f"Z-report-daily-totals-{date}_{date}.csv",
+                        make_csv_bytes([], Z_TOTALS_FIELDS))
+
+        with patch("run_reports.build_report") as mock_build:
+            run(self.data_dir, self.reports_dir)
+            mock_build.assert_not_called()
+
     def test_no_data_prints_message(self):
         import io as _io
         from contextlib import redirect_stdout
@@ -432,6 +526,26 @@ class TestRun(unittest.TestCase):
         with redirect_stdout(buf):
             run(self.data_dir, self.reports_dir)
         self.assertIn("No GoBD daily zip files found", buf.getvalue())
+
+    def test_empty_day_counted_separately(self):
+        """Empty days should not increment the 'already exist' counter."""
+        date = "2026-03-01"
+        filename = f"GoBD-daily-archive-{date}_{date}.zip"
+        with zipfile.ZipFile(os.path.join(self.data_dir, filename), "w") as zf:
+            zf.writestr(f"GoBD-report-sales-payments-{date}_{date}.csv",
+                        make_csv_bytes([BASE_PAYMENT], PAYMENT_FIELDS))
+            zf.writestr(f"GoBD-report-sales-taxes-{date}_{date}.csv",
+                        make_csv_bytes([BASE_TAX], TAX_FIELDS))
+            zf.writestr(f"Z-report-daily-totals-{date}_{date}.csv",
+                        make_csv_bytes([], Z_TOTALS_FIELDS))
+        import io as _io
+        from contextlib import redirect_stdout
+        buf = _io.StringIO()
+        with redirect_stdout(buf):
+            run(self.data_dir, self.reports_dir)
+        output = buf.getvalue()
+        self.assertIn("Skipped (no sales): 1", output)
+        self.assertIn("Skipped (already exist): 0", output)
 
 
 if __name__ == "__main__":

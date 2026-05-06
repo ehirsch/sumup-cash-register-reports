@@ -6,8 +6,9 @@ Reports are organised into per-month subfolders: reports/YYYY-MM/
 
 import os
 import re
+import zipfile
 import argparse
-from generate_report import build_report
+from generate_report import build_report, read_csv_from_zip
 
 ZIP_PATTERN = re.compile(r"GoBD-daily-archive-(\d{4}-\d{2})-(\d{2})_\d{4}-\d{2}-\d{2}\.zip")
 
@@ -29,14 +30,28 @@ def run(data_dir: str, reports_dir: str):
         print(f"No GoBD daily zip files found in '{data_dir}'.")
         return
 
-    generated = skipped = 0
+    generated = skipped = empty = 0
 
     for date in sorted(zips):
         month = date[:7]  # YYYY-MM
         month_dir = os.path.join(reports_dir, month)
         os.makedirs(month_dir, exist_ok=True)
 
-        report_file = os.path.join(month_dir, f"tax_report_{date}.pdf")
+        # Read fiscal number; skip days with no Z-report data (no sales)
+        try:
+            with zipfile.ZipFile(zips[date]) as zf:
+                z_totals = read_csv_from_zip(zf, "daily-totals")
+        except Exception:
+            z_totals = []
+
+        if not z_totals:
+            print(f"Skipping {date} – no sales data.")
+            empty += 1
+            continue
+
+        fiscal = z_totals[0].get("Fiscal Number", "")
+        suffix = f"_Z{fiscal}" if fiscal else ""
+        report_file = os.path.join(month_dir, f"tax_report_{date}{suffix}.pdf")
 
         if os.path.isfile(report_file):
             print(f"Skipping {date} – report already exists: {report_file}")
@@ -47,7 +62,7 @@ def run(data_dir: str, reports_dir: str):
         build_report(zips[date], report_file)
         generated += 1
 
-    print(f"\nDone. Generated: {generated}, Skipped (already exist): {skipped}.")
+    print(f"\nDone. Generated: {generated}, Skipped (already exist): {skipped}, Skipped (no sales): {empty}.")
 
 
 def main():
