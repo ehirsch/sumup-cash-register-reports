@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Monthly Revenue Report Generator
-Reads GoBD payment and tax CSV files and produces a PDF summary.
+Daily Revenue Report Generator
+Reads a SumUp GoBD daily zip archive and produces a PDF tax report.
 """
 
 import csv
+import io
 import sys
 import os
 import argparse
-from decimal import Decimal, ROUND_HALF_UP
+import zipfile
+from decimal import Decimal
 from collections import defaultdict
 from datetime import datetime
 
@@ -17,7 +19,7 @@ from reportlab.lib import colors
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER
 
 
 def parse_decimal(value: str) -> Decimal:
@@ -25,29 +27,29 @@ def parse_decimal(value: str) -> Decimal:
     return Decimal(value.strip().replace(",", "."))
 
 
-def read_payments(filepath: str) -> list[dict]:
-    with open(filepath, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter=";")
-        rows = []
-        for row in reader:
-            # Strip quotes from keys/values
-            clean = {k.strip('"'): v.strip('"') for k, v in row.items()}
-            rows.append(clean)
-    return rows
-
-
-def read_taxes(filepath: str) -> list[dict]:
-    return read_payments(filepath)  # same structure
-
-
 def fmt(value: Decimal) -> str:
     """Format decimal as German locale currency string."""
     return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " €"
 
 
-def build_report(payments_file: str, taxes_file: str, output_file: str):
-    payments = read_payments(payments_file)
-    taxes = read_taxes(taxes_file)
+def read_csv_from_zip(zf: zipfile.ZipFile, name_fragment: str) -> list[dict]:
+    """Read the first zip entry whose name contains name_fragment as a CSV."""
+    match = next((n for n in zf.namelist() if name_fragment in n), None)
+    if match is None:
+        raise FileNotFoundError(f"No file matching '{name_fragment}' found in zip.")
+    content = zf.read(match).decode("utf-8")
+    reader = csv.DictReader(io.StringIO(content), delimiter=";")
+    return [{k.strip('"'): v.strip('"') for k, v in row.items()} for row in reader]
+
+
+def build_report(zip_file: str, output_file: str):
+    """
+    Build a daily PDF report from a GoBD daily zip archive.
+    Returns the report date string (YYYY-MM-DD).
+    """
+    with zipfile.ZipFile(zip_file) as zf:
+        payments = read_csv_from_zip(zf, "sales-payments")
+        taxes = read_csv_from_zip(zf, "sales-taxes")
 
     # --- Aggregate payments ---
     total_revenue = Decimal("0")
@@ -84,31 +86,26 @@ def build_report(payments_file: str, taxes_file: str, output_file: str):
             tax_totals[method][rate]["sales_excl"] += parse_decimal(t["Total Sales Excl Tax"])
             tax_totals[method][rate]["tax_amount"] += parse_decimal(t["Total Tax Amount"])
 
-    # --- Determine period and report month from data ---
+    # --- Derive report date and label ---
     dates = [p["Fiscal Date"][:10] for p in payments if p.get("Fiscal Date")]
-    period_start = min(dates) if dates else ""
-    period_end = max(dates) if dates else ""
-
-    # Derive report month (YYYY-MM) from the majority of dates
-    report_month = period_start[:7] if period_start else ""  # e.g. "2026-03"
-    report_month_label = ""
-    if report_month:
-        dt = datetime.strptime(report_month, "%Y-%m")
-        # German month names
-        month_names = ["Januar", "Februar", "März", "April", "Mai", "Juni",
-                       "Juli", "August", "September", "Oktober", "November", "Dezember"]
-        report_month_label = f"{month_names[dt.month - 1]} {dt.year}"
+    report_date = min(dates) if dates else ""
 
     merchant = payments[0]["Merchant Name"] if payments else "Unknown"
+
+    date_label = ""
+    if report_date:
+        dt = datetime.strptime(report_date, "%Y-%m-%d")
+        day_names = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+        month_names = ["Januar", "Februar", "März", "April", "Mai", "Juni",
+                       "Juli", "August", "September", "Oktober", "November", "Dezember"]
+        date_label = f"{day_names[dt.weekday()]}, {dt.day:02d}. {month_names[dt.month - 1]} {dt.year}"
 
     # --- Build PDF ---
     doc = SimpleDocTemplate(
         output_file,
         pagesize=A4,
-        leftMargin=2 * cm,
-        rightMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2 * cm,
+        leftMargin=2 * cm, rightMargin=2 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm,
     )
 
     styles = getSampleStyleSheet()
@@ -117,16 +114,15 @@ def build_report(payments_file: str, taxes_file: str, output_file: str):
                                     textColor=colors.grey, spaceAfter=20, alignment=TA_CENTER)
     section_style = ParagraphStyle("section", parent=styles["Heading2"], fontSize=13,
                                    spaceBefore=16, spaceAfter=8)
+    subsection_style = ParagraphStyle("subsection", parent=styles["Normal"], fontSize=11,
+                                      fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=4)
 
     story = []
+    story.append(Paragraph(f"Tagesbericht – {merchant}", title_style))
+    story.append(Paragraph(date_label, subtitle_style))
 
-    # Title
-    story.append(Paragraph(f"Monatsbericht {report_month_label} – {merchant}", title_style))
-    story.append(Paragraph(f"Zeitraum: {period_start} bis {period_end}", subtitle_style))
-
-    # --- Revenue summary table ---
+    # --- Revenue summary ---
     story.append(Paragraph("Umsatzübersicht", section_style))
-
     summary_data = [
         ["", "Betrag"],
         ["Gesamtumsatz", fmt(total_revenue)],
@@ -134,7 +130,6 @@ def build_report(payments_file: str, taxes_file: str, output_file: str):
         ["davon Kartenzahlung", fmt(card_revenue)],
         ["Anzahl Transaktionen", str(num_sales)],
     ]
-
     summary_table = Table(summary_data, colWidths=[10 * cm, 5 * cm])
     summary_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
@@ -152,25 +147,18 @@ def build_report(payments_file: str, taxes_file: str, output_file: str):
     ]))
     story.append(summary_table)
 
-    # --- Tax breakdown tables per payment method ---
+    # --- Tax breakdown per payment method ---
     story.append(Paragraph("Steueraufschlüsselung", section_style))
-
     col_widths = [3.5 * cm, 4.5 * cm, 4.5 * cm, 4.5 * cm]
     tax_header = ["Steuersatz", "Brutto (inkl. MwSt.)", "Netto (exkl. MwSt.)", "Steuerbetrag"]
 
-    subsection_style = ParagraphStyle("subsection", parent=styles["Normal"], fontSize=11,
-                                      fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=4)
-
     for method, label in [("CASH", "Barzahlung"), ("CARD", "Kartenzahlung")]:
         story.append(Paragraph(label, subsection_style))
-
         rates = tax_totals[method]
         sorted_rates = sorted(rates.keys(), key=lambda r: int(r.replace("%", "")))
 
         tax_rows = [tax_header]
-        total_incl = Decimal("0")
-        total_excl = Decimal("0")
-        total_tax = Decimal("0")
+        total_incl = total_excl = total_tax = Decimal("0")
 
         for rate in sorted_rates:
             d = rates[rate]
@@ -200,50 +188,42 @@ def build_report(payments_file: str, taxes_file: str, output_file: str):
         ]))
         story.append(tax_table)
 
-    # Footer note
+    # Footer
     story.append(Spacer(1, 1 * cm))
-    note_style = ParagraphStyle("note", parent=styles["Normal"], fontSize=8,
-                                textColor=colors.grey)
+    note_style = ParagraphStyle("note", parent=styles["Normal"], fontSize=8, textColor=colors.grey)
     story.append(Paragraph(
         f"Erstellt am {datetime.now().strftime('%d.%m.%Y %H:%M')} | "
-        f"Quelldateien: {os.path.basename(payments_file)}, {os.path.basename(taxes_file)}",
+        f"Quelldatei: {os.path.basename(zip_file)}",
         note_style,
     ))
 
     doc.build(story)
     print(f"Report saved to: {output_file}")
-    return report_month
+    return report_date
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate a monthly revenue PDF report from GoBD CSV exports."
+        description="Generate a daily revenue PDF report from a GoBD daily zip archive."
     )
-    parser.add_argument("payments_csv", help="Path to the payments CSV file")
-    parser.add_argument("taxes_csv", help="Path to the taxes CSV file")
-    parser.add_argument(
-        "-o", "--output",
-        default="monthly_report.pdf",
-        help="Output PDF filename (default: monthly_report.pdf)",
-    )
+    parser.add_argument("zip_file", help="Path to the GoBD daily zip archive")
+    parser.add_argument("-o", "--output", default="",
+                        help="Output PDF filename. Auto-generated if omitted.")
     args = parser.parse_args()
 
-    for f in (args.payments_csv, args.taxes_csv):
-        if not os.path.isfile(f):
-            print(f"Error: file not found: {f}", file=sys.stderr)
-            sys.exit(1)
+    if not os.path.isfile(args.zip_file):
+        print(f"Error: file not found: {args.zip_file}", file=sys.stderr)
+        sys.exit(1)
 
-    # Auto-generate sortable filename if not specified
     output = args.output
-    if output == "monthly_report.pdf":
-        # Peek at the data to get the month before building
-        payments = read_payments(args.payments_csv)
-        dates = [p["Fiscal Date"][:10] for p in payments if p.get("Fiscal Date")]
-        if dates:
-            report_month = min(dates)[:7]  # YYYY-MM
-            output = f"tax_report_{report_month}.pdf"
+    if not output:
+        # derive date from filename, e.g. GoBD-daily-archive-2026-03-06_2026-03-06.zip
+        import re
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(args.zip_file))
+        date = m.group(1) if m else "unknown"
+        output = f"tax_report_{date}.pdf"
 
-    build_report(args.payments_csv, args.taxes_csv, output)
+    build_report(args.zip_file, output)
 
 
 if __name__ == "__main__":
