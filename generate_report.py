@@ -96,6 +96,8 @@ def build_report(zip_file: str, output_file: str):
 
     for t in taxes:
         rate = t["Tax Rate"]
+        if not rate:  # skip tax-exempt rows (0% / empty rate)
+            continue
         method = sale_method.get(t["Sale ID"], "")
         if method in tax_totals:
             tax_totals[method][rate]["sales_incl"] += parse_decimal(t["Total Sales Incl Tax"])

@@ -248,6 +248,19 @@ class TestBuildReport(unittest.TestCase):
         build_report(self.zip_file, self.output_file)
         self.assertTrue(os.path.isfile(self.output_file))
 
+    def test_empty_tax_rate_skipped(self):
+        """Tax rows with an empty Tax Rate (tax-exempt items) should not cause a crash."""
+        payments = [{**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CARD"}]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "19%",
+             "Total Sales Incl Tax": "20,00", "Total Sales Excl Tax": "16,81", "Total Tax Amount": "3,19"},
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "",
+             "Total Sales Incl Tax": "40,00", "Total Sales Excl Tax": "40,00", "Total Tax Amount": "0,00"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
     def test_cash_and_card_split(self):
         payments = [
             {**BASE_PAYMENT, "Sale ID": "s1", "Total Payments": "10,00", "Payment Method": "CASH"},
