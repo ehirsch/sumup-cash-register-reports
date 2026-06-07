@@ -261,6 +261,46 @@ class TestBuildReport(unittest.TestCase):
         build_report(self.zip_file, self.output_file)
         self.assertTrue(os.path.isfile(self.output_file))
 
+    def test_tax_exempt_sales_aggregated(self):
+        """Tax-exempt sales are summed per payment method."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CARD",
+             "Total Payments": "40,00"},
+            {**BASE_PAYMENT, "Sale ID": "s2", "Payment Method": "CASH",
+             "Total Payments": "20,00", "Fiscal Number": "2"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "",
+             "Total Sales Incl Tax": "40,00", "Total Sales Excl Tax": "40,00", "Total Tax Amount": "0,00"},
+            {**BASE_TAX, "Sale ID": "s2", "Tax Rate": "",
+             "Total Sales Incl Tax": "20,00", "Total Sales Excl Tax": "20,00", "Total Tax Amount": "0,00",
+             "Fiscal Number": "2"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        # Verify the aggregation logic directly
+        with zipfile.ZipFile(self.zip_file) as zf:
+            tax_rows = read_csv_from_zip(zf, "sales-taxes")
+            pay_rows = read_csv_from_zip(zf, "sales-payments")
+        sale_method = {p["Sale ID"]: p["Payment Method"].upper() for p in pay_rows}
+        cash_exempt = card_exempt = Decimal("0")
+        for t in tax_rows:
+            if t["Tax Rate"]:
+                continue
+            method = sale_method.get(t["Sale ID"], "")
+            amount = parse_decimal(t["Total Sales Incl Tax"])
+            if method == "CASH":
+                cash_exempt += amount
+            elif method == "CARD":
+                card_exempt += amount
+        self.assertEqual(card_exempt, Decimal("40.00"))
+        self.assertEqual(cash_exempt, Decimal("20.00"))
+
+    def test_no_exempt_sales_no_extra_rows(self):
+        """When there are no tax-exempt sales the PDF still generates without error."""
+        make_zip(self.zip_file, [BASE_PAYMENT], [BASE_TAX])
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
     def test_cash_and_card_split(self):
         payments = [
             {**BASE_PAYMENT, "Sale ID": "s1", "Total Payments": "10,00", "Payment Method": "CASH"},

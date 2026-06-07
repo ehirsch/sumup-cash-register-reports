@@ -104,6 +104,20 @@ def build_report(zip_file: str, output_file: str):
             tax_totals[method][rate]["sales_excl"] += parse_decimal(t["Total Sales Excl Tax"])
             tax_totals[method][rate]["tax_amount"] += parse_decimal(t["Total Tax Amount"])
 
+    # --- Aggregate tax-exempt sales (empty Tax Rate) per payment method ---
+    cash_exempt = Decimal("0")
+    card_exempt = Decimal("0")
+    for t in taxes:
+        if t["Tax Rate"]:
+            continue
+        method = sale_method.get(t["Sale ID"], "")
+        amount = parse_decimal(t["Total Sales Incl Tax"])
+        if method == "CASH":
+            cash_exempt += amount
+        elif method == "CARD":
+            card_exempt += amount
+    total_exempt = cash_exempt + card_exempt
+
     # --- Derive report date, fiscal number and label ---
     dates = [p["Fiscal Date"][:10] for p in payments if p.get("Fiscal Date")]
     report_date = min(dates) if dates else ""
@@ -169,6 +183,12 @@ def build_report(zip_file: str, output_file: str):
         ["davon Barzahlung", fmt(cash_tips)],
         ["davon Kartenzahlung", fmt(card_tips)],
     ]
+    if total_exempt > 0:
+        summary_data += [
+            ["Steuerfreie Umsätze (z.B. Gutscheine)", fmt(total_exempt)],
+            ["davon Barzahlung", fmt(cash_exempt)],
+            ["davon Kartenzahlung", fmt(card_exempt)],
+        ]
     summary_table = Table(summary_data, colWidths=[10 * cm, 5 * cm])
     summary_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
