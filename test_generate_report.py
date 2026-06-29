@@ -248,6 +248,75 @@ class TestBuildReport(unittest.TestCase):
         build_report(self.zip_file, self.output_file)
         self.assertTrue(os.path.isfile(self.output_file))
 
+    def test_split_payment_tax_proportional(self):
+        """A 50/50 split payment attributes taxes proportionally to each method."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CASH", "Total Payments": "28,10"},
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CARD", "Total Payments": "28,10",
+             "Fiscal Number": "1"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "19%",
+             "Total Sales Incl Tax": "26,00", "Total Sales Excl Tax": "21,85", "Total Tax Amount": "4,16"},
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "7%",
+             "Total Sales Incl Tax": "30,20", "Total Sales Excl Tax": "28,22", "Total Tax Amount": "1,98"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
+    def test_split_payment_proportional_amounts(self):
+        """Tax amounts are split proportionally across methods, not doubled."""
+        from generate_report import read_csv_from_zip
+        import zipfile as _zf
+        # 75% cash, 25% card — tax of 4,00 should give ~3,00 cash, ~1,00 card
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CASH", "Total Payments": "30,00"},
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CARD", "Total Payments": "10,00",
+             "Fiscal Number": "1"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "19%",
+             "Total Sales Incl Tax": "40,00", "Total Sales Excl Tax": "33,61", "Total Tax Amount": "4,00"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        with _zf.ZipFile(self.zip_file) as zf:
+            p_rows = read_csv_from_zip(zf, "sales-payments")
+            t_rows = read_csv_from_zip(zf, "sales-taxes")
+        sale_payments = {}
+        for p in p_rows:
+            sale_payments.setdefault(p["Sale ID"], {})[p["Payment Method"].upper()] = parse_decimal(p["Total Payments"])
+        cash_tax = card_tax = Decimal("0")
+        for t in t_rows:
+            if not t["Tax Rate"]:
+                continue
+            parts = sale_payments.get(t["Sale ID"], {})
+            total = sum(parts.values())
+            tax = parse_decimal(t["Total Tax Amount"])
+            for method, amt in parts.items():
+                share = (tax * (amt / total)).quantize(Decimal("0.01"))
+                if method == "CASH":
+                    cash_tax += share
+                elif method == "CARD":
+                    card_tax += share
+        self.assertEqual(cash_tax, Decimal("3.00"))
+        self.assertEqual(card_tax, Decimal("1.00"))
+
+    def test_split_payment_totals_not_doubled(self):
+        """Revenue totals for a split payment count each payment portion once."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CASH", "Total Payments": "28,10"},
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CARD", "Total Payments": "28,10",
+             "Fiscal Number": "1"},
+        ]
+        make_zip(self.zip_file, payments, [BASE_TAX])
+        with __import__("zipfile").ZipFile(self.zip_file) as zf:
+            p_rows = read_csv_from_zip(zf, "sales-payments")
+        cash = sum(parse_decimal(r["Total Payments"]) for r in p_rows if r["Payment Method"] == "CASH")
+        card = sum(parse_decimal(r["Total Payments"]) for r in p_rows if r["Payment Method"] == "CARD")
+        # Each portion is counted once — total is 56,20 not 112,40
+        self.assertEqual(cash + card, Decimal("56.20"))
+
     def test_empty_tax_rate_skipped(self):
         """Tax rows with an empty Tax Rate (tax-exempt items) should not cause a crash."""
         payments = [{**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CARD"}]

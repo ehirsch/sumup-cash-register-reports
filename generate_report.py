@@ -68,24 +68,38 @@ def build_report(zip_file: str, output_file: str):
         elif method == "CARD":
             card_revenue += amount
 
-    # Build sale_id -> payment method lookup
-    sale_method = {p["Sale ID"]: p["Payment Method"].upper() for p in payments}
+    # Build sale_id -> {method: amount} for all payments (handles split payments)
+    sale_payments: dict[str, dict[str, Decimal]] = {}
+    for p in payments:
+        sid = p["Sale ID"]
+        method = p["Payment Method"].upper()
+        amount = parse_decimal(p["Total Payments"])
+        sale_payments.setdefault(sid, {})[method] = amount
 
-    # --- Aggregate tips per payment method ---
+    def payment_shares(sale_id: str) -> dict[str, Decimal]:
+        """Return {method: fraction} for a sale, based on actual payment amounts."""
+        parts = sale_payments.get(sale_id, {})
+        total = sum(parts.values())
+        if not total:
+            return {}
+        return {m: amt / total for m, amt in parts.items()}
+
+    # --- Aggregate tips per payment method (proportional for split payments) ---
     cash_tips = Decimal("0")
     card_tips = Decimal("0")
     for t in totals:
         tip = parse_decimal(t.get("Total Tips", "0"))
         if tip == 0:
             continue
-        method = sale_method.get(t["Sale ID"], "")
-        if method == "CASH":
-            cash_tips += tip
-        elif method == "CARD":
-            card_tips += tip
+        for method, share in payment_shares(t["Sale ID"]).items():
+            portion = (tip * share).quantize(Decimal("0.01"))
+            if method == "CASH":
+                cash_tips += portion
+            elif method == "CARD":
+                card_tips += portion
     total_tips = cash_tips + card_tips
 
-    # --- Aggregate taxes per payment method and rate ---
+    # --- Aggregate taxes per payment method and rate (proportional for split payments) ---
     def empty_tax():
         return {"sales_incl": Decimal("0"), "sales_excl": Decimal("0"), "tax_amount": Decimal("0")}
 
@@ -96,13 +110,14 @@ def build_report(zip_file: str, output_file: str):
 
     for t in taxes:
         rate = t["Tax Rate"]
-        if not rate:  # skip tax-exempt rows (0% / empty rate)
+        if not rate:  # skip tax-exempt rows (handled separately below)
             continue
-        method = sale_method.get(t["Sale ID"], "")
-        if method in tax_totals:
-            tax_totals[method][rate]["sales_incl"] += parse_decimal(t["Total Sales Incl Tax"])
-            tax_totals[method][rate]["sales_excl"] += parse_decimal(t["Total Sales Excl Tax"])
-            tax_totals[method][rate]["tax_amount"] += parse_decimal(t["Total Tax Amount"])
+        for method, share in payment_shares(t["Sale ID"]).items():
+            if method not in tax_totals:
+                continue
+            tax_totals[method][rate]["sales_incl"] += (parse_decimal(t["Total Sales Incl Tax"]) * share).quantize(Decimal("0.01"))
+            tax_totals[method][rate]["sales_excl"] += (parse_decimal(t["Total Sales Excl Tax"]) * share).quantize(Decimal("0.01"))
+            tax_totals[method][rate]["tax_amount"] += (parse_decimal(t["Total Tax Amount"]) * share).quantize(Decimal("0.01"))
 
     # --- Aggregate tax-exempt sales (empty Tax Rate) per payment method ---
     cash_exempt = Decimal("0")
@@ -110,12 +125,12 @@ def build_report(zip_file: str, output_file: str):
     for t in taxes:
         if t["Tax Rate"]:
             continue
-        method = sale_method.get(t["Sale ID"], "")
-        amount = parse_decimal(t["Total Sales Incl Tax"])
-        if method == "CASH":
-            cash_exempt += amount
-        elif method == "CARD":
-            card_exempt += amount
+        for method, share in payment_shares(t["Sale ID"]).items():
+            amount = (parse_decimal(t["Total Sales Incl Tax"]) * share).quantize(Decimal("0.01"))
+            if method == "CASH":
+                cash_exempt += amount
+            elif method == "CARD":
+                card_exempt += amount
     total_exempt = cash_exempt + card_exempt
 
     # --- Derive report date, fiscal number and label ---
