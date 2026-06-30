@@ -21,6 +21,11 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
+# Payment methods that represent real money received today
+CASH_CARD_METHODS = {"CASH", "CARD"}
+# All known methods including voucher redemption
+ALL_METHODS = {"CASH", "CARD", "GIFT_CARD"}
+
 
 def parse_decimal(value: str) -> Decimal:
     """Parse German-locale decimal string (comma as separator)."""
@@ -54,19 +59,24 @@ def build_report(zip_file: str, output_file: str):
         z_totals = read_csv_from_zip(zf, "daily-totals")
 
     # --- Aggregate payments ---
+    # Only CASH and CARD count as revenue today; GIFT_CARD is a redemption
     total_revenue = Decimal("0")
     cash_revenue = Decimal("0")
     card_revenue = Decimal("0")
-    num_sales = len(payments)
+    gift_card_redeemed = Decimal("0")
+    num_sales = len({p["Sale ID"] for p in payments})  # unique sales
 
     for p in payments:
         amount = parse_decimal(p["Total Payments"])
         method = p["Payment Method"].upper()
-        total_revenue += amount
         if method == "CASH":
             cash_revenue += amount
+            total_revenue += amount
         elif method == "CARD":
             card_revenue += amount
+            total_revenue += amount
+        elif method == "GIFT_CARD":
+            gift_card_redeemed += amount
 
     # Build sale_id -> {method: amount} for all payments (handles split payments)
     sale_payments: dict[str, dict[str, Decimal]] = {}
@@ -106,6 +116,7 @@ def build_report(zip_file: str, output_file: str):
     tax_totals: dict[str, dict[str, dict]] = {
         "CASH": defaultdict(empty_tax),
         "CARD": defaultdict(empty_tax),
+        "GIFT_CARD": defaultdict(empty_tax),
     }
 
     for t in taxes:
@@ -153,17 +164,39 @@ def build_report(zip_file: str, output_file: str):
         output_file,
         pagesize=A4,
         leftMargin=2 * cm, rightMargin=2 * cm,
-        topMargin=2 * cm, bottomMargin=2 * cm,
+        topMargin=1.5 * cm, bottomMargin=1.5 * cm,
     )
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("title", parent=styles["Title"], fontSize=18, spaceAfter=6)
-    subtitle_style = ParagraphStyle("subtitle", parent=styles["Normal"], fontSize=11,
-                                    textColor=colors.grey, spaceAfter=20, alignment=TA_CENTER)
-    section_style = ParagraphStyle("section", parent=styles["Heading2"], fontSize=13,
-                                   spaceBefore=16, spaceAfter=8)
-    subsection_style = ParagraphStyle("subsection", parent=styles["Normal"], fontSize=11,
-                                      fontName="Helvetica-Bold", spaceBefore=12, spaceAfter=4)
+    title_style = ParagraphStyle("title", parent=styles["Title"], fontSize=16, spaceAfter=4)
+    subtitle_style = ParagraphStyle("subtitle", parent=styles["Normal"], fontSize=10,
+                                    textColor=colors.grey, spaceAfter=6, alignment=TA_CENTER)
+    section_style = ParagraphStyle("section", parent=styles["Heading2"], fontSize=11,
+                                   spaceBefore=8, spaceAfter=4)
+    subsection_style = ParagraphStyle("subsection", parent=styles["Normal"], fontSize=10,
+                                      fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=2)
+    note_style = ParagraphStyle("note", parent=styles["Normal"], fontSize=8, textColor=colors.grey)
+
+    FONT_SIZE = 10
+    PAD = 4
+
+    def tax_table_style():
+        return TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), FONT_SIZE),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.HexColor("#ecf0f1"), colors.white]),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#d5e8d4")),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("LINEABOVE", (0, -1), (-1, -1), 1, colors.HexColor("#2c3e50")),
+            ("LINEBELOW", (0, -1), (-1, -1), 1, colors.HexColor("#2c3e50")),
+            ("TOPPADDING", (0, 0), (-1, -1), PAD),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), PAD),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ])
 
     story = []
     story.append(Paragraph(f"Tagesbericht – {merchant}", title_style))
@@ -172,7 +205,6 @@ def build_report(zip_file: str, output_file: str):
     fiscal_label = f"Z-Bericht Nr. {fiscal_number}" if fiscal_number else ""
     date_right = report_date.replace("-", ".") if report_date else ""
     header_right = f"{date_right}   {fiscal_label}".strip()
-
     header_table = Table(
         [[Paragraph(date_label, subtitle_style), Paragraph(header_right, subtitle_style)]],
         colWidths=[11 * cm, 6 * cm],
@@ -182,7 +214,7 @@ def build_report(zip_file: str, output_file: str):
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
     story.append(header_table)
 
@@ -190,7 +222,7 @@ def build_report(zip_file: str, output_file: str):
     story.append(Paragraph("Umsatzübersicht", section_style))
     summary_data = [
         ["", "Betrag"],
-        ["Gesamtumsatz", fmt(total_revenue)],
+        ["Gesamtumsatz (Bar + Karte)", fmt(total_revenue)],
         ["davon Barzahlung", fmt(cash_revenue)],
         ["davon Kartenzahlung", fmt(card_revenue)],
         ["Anzahl Transaktionen", str(num_sales)],
@@ -198,39 +230,50 @@ def build_report(zip_file: str, output_file: str):
         ["davon Barzahlung", fmt(cash_tips)],
         ["davon Kartenzahlung", fmt(card_tips)],
     ]
+    if gift_card_redeemed > 0:
+        summary_data.append(["Gutscheineinlösungen (kein neuer Umsatz)", fmt(gift_card_redeemed)])
     if total_exempt > 0:
         summary_data += [
-            ["Steuerfreie Umsätze (z.B. Gutscheine)", fmt(total_exempt)],
+            ["Steuerfreie Umsätze (z.B. Gutscheinverkauf)", fmt(total_exempt)],
             ["davon Barzahlung", fmt(cash_exempt)],
             ["davon Kartenzahlung", fmt(card_exempt)],
         ]
-    summary_table = Table(summary_data, colWidths=[10 * cm, 5 * cm])
+
+    summary_table = Table(summary_data, colWidths=[11 * cm, 4 * cm])
     summary_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 11),
+        ("FONTSIZE", (0, 0), (-1, -1), FONT_SIZE),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#ecf0f1"), colors.white]),
         ("FONTNAME", (0, 1), (0, 1), "Helvetica-Bold"),
         ("LINEBELOW", (0, -1), (-1, -1), 1, colors.HexColor("#2c3e50")),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        # Highlight the gift card row in a distinct colour if present
+        *([("BACKGROUND", (0, 8), (-1, 8), colors.HexColor("#fdebd0")),
+           ("FONTNAME", (0, 8), (-1, 8), "Helvetica-Bold")]
+          if gift_card_redeemed > 0 else []),
+        ("TOPPADDING", (0, 0), (-1, -1), PAD),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), PAD),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
     ]))
     story.append(summary_table)
 
     # --- Tax breakdown per payment method ---
     story.append(Paragraph("Steueraufschlüsselung", section_style))
-    col_widths = [3.5 * cm, 4.5 * cm, 4.5 * cm, 4.5 * cm]
+    col_widths = [3.0 * cm, 4.0 * cm, 4.0 * cm, 4.0 * cm]
     tax_header = ["Steuersatz", "Brutto (inkl. MwSt.)", "Netto (exkl. MwSt.)", "Steuerbetrag"]
 
-    for method, label in [("CASH", "Barzahlung"), ("CARD", "Kartenzahlung")]:
-        story.append(Paragraph(label, subsection_style))
+    method_labels = [("CASH", "Barzahlung"), ("CARD", "Kartenzahlung"), ("GIFT_CARD", "Gutscheineinlösungen")]
+
+    for method, label in method_labels:
         rates = tax_totals[method]
+        if not rates:
+            continue  # skip section entirely if no data for this method
         sorted_rates = sorted(rates.keys(), key=lambda r: int(r.replace("%", "")))
 
+        story.append(Paragraph(label, subsection_style))
         tax_rows = [tax_header]
         total_incl = total_excl = total_tax = Decimal("0")
 
@@ -242,29 +285,12 @@ def build_report(zip_file: str, output_file: str):
             total_tax += d["tax_amount"]
 
         tax_rows.append(["Gesamt", fmt(total_incl), fmt(total_excl), fmt(total_tax)])
-
         tax_table = Table(tax_rows, colWidths=col_widths)
-        tax_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 11),
-            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.HexColor("#ecf0f1"), colors.white]),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#d5e8d4")),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("LINEABOVE", (0, -1), (-1, -1), 1.5, colors.HexColor("#2c3e50")),
-            ("LINEBELOW", (0, -1), (-1, -1), 1, colors.HexColor("#2c3e50")),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ]))
+        tax_table.setStyle(tax_table_style())
         story.append(tax_table)
 
     # Footer
-    story.append(Spacer(1, 1 * cm))
-    note_style = ParagraphStyle("note", parent=styles["Normal"], fontSize=8, textColor=colors.grey)
+    story.append(Spacer(1, 0.4 * cm))
     story.append(Paragraph(
         f"Erstellt am {datetime.now().strftime('%d.%m.%Y %H:%M')} | "
         f"Quelldatei: {os.path.basename(zip_file)}",
@@ -294,7 +320,6 @@ def main():
         import re
         m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(args.zip_file))
         date = m.group(1) if m else "unknown"
-        # Read fiscal number for filename
         try:
             with zipfile.ZipFile(args.zip_file) as zf:
                 z_totals = read_csv_from_zip(zf, "daily-totals")

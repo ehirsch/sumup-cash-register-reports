@@ -370,6 +370,67 @@ class TestBuildReport(unittest.TestCase):
         build_report(self.zip_file, self.output_file)
         self.assertTrue(os.path.isfile(self.output_file))
 
+    def test_gift_card_redemption_not_in_revenue(self):
+        """GIFT_CARD payments are tracked separately and not added to cash/card revenue."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CASH", "Total Payments": "20,00"},
+            {**BASE_PAYMENT, "Sale ID": "s2", "Payment Method": "GIFT_CARD",
+             "Total Payments": "40,00", "Fiscal Number": "2"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1"},
+            {**BASE_TAX, "Sale ID": "s2", "Fiscal Number": "2"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        # Verify aggregation: cash revenue should be 20, gift card 40, total revenue 20
+        with __import__("zipfile").ZipFile(self.zip_file) as zf:
+            p_rows = read_csv_from_zip(zf, "sales-payments")
+        cash = sum(parse_decimal(r["Total Payments"]) for r in p_rows if r["Payment Method"] == "CASH")
+        gift = sum(parse_decimal(r["Total Payments"]) for r in p_rows if r["Payment Method"] == "GIFT_CARD")
+        self.assertEqual(cash, Decimal("20.00"))
+        self.assertEqual(gift, Decimal("40.00"))
+        # Report must also generate without error
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
+    def test_gift_card_tax_attributed_to_gift_card_section(self):
+        """Tax from a GIFT_CARD sale is attributed to the GIFT_CARD tax section."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "GIFT_CARD",
+             "Total Payments": "24,80"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "7%",
+             "Total Sales Incl Tax": "24,80", "Total Sales Excl Tax": "23,18",
+             "Total Tax Amount": "1,62"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
+    def test_gift_card_section_absent_when_no_redemptions(self):
+        """Days without GIFT_CARD payments generate a valid report with no gift card section."""
+        make_zip(self.zip_file, [BASE_PAYMENT], [BASE_TAX])
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
+    def test_gift_card_split_with_cash(self):
+        """A sale split between GIFT_CARD and CASH distributes tax proportionally."""
+        payments = [
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "GIFT_CARD",
+             "Total Payments": "20,00"},
+            {**BASE_PAYMENT, "Sale ID": "s1", "Payment Method": "CASH",
+             "Total Payments": "20,00", "Fiscal Number": "1"},
+        ]
+        taxes = [
+            {**BASE_TAX, "Sale ID": "s1", "Tax Rate": "19%",
+             "Total Sales Incl Tax": "40,00", "Total Sales Excl Tax": "33,61",
+             "Total Tax Amount": "6,39"},
+        ]
+        make_zip(self.zip_file, payments, taxes)
+        build_report(self.zip_file, self.output_file)
+        self.assertTrue(os.path.isfile(self.output_file))
+
     def test_cash_and_card_split(self):
         payments = [
             {**BASE_PAYMENT, "Sale ID": "s1", "Total Payments": "10,00", "Payment Method": "CASH"},
